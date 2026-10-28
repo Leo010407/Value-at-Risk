@@ -42,13 +42,16 @@ years = 15
 end_date = dt.datetime.now()
 start_date = end_date - dt.timedelta(days = 365*years)
 
-# Define the assets in the portfolio (e.g., European Banks and Gold)
+# Define the assets in the portfolio
 tickers = ['DBK.DE', 'CBK.DE' , 'SAN.MC', 'BNP.PA', 'GLD']
 
 # Define the Monte Carlo simulation parameters
 simulations = 10000       # Number of random scenarios to generate
-days = 100                # Time horizon for the VaR projection (e.g., 100 trading days)
-prf_value = 1000000       # Initial portfolio value in dollars
+days = 100                # Time horizon for the VaR projection 
+prf_value = 1000000       # Initial portfolio value
+
+# Set confidence level (95% means we expect losses to exceed VaR only 5% of the time)
+conf_lvl = 0.95
 
 # ---------------------------------------------------------
 # Data Fetching & Processing
@@ -92,12 +95,9 @@ for i in range(simulations):
 # Value at Risk (VaR) Calculation & Visualization
 # ---------------------------------------------------------
 
-# Set confidence level (95% means we expect losses to exceed VaR only 5% of the time)
-conf_lvl = 0.95
-
 # Calculate VaR by finding the exact percentile in our sorted simulated returns
 # For 95% confidence, we look at the 5th percentile (100 * (1 - 0.95))
-VaR = np.percentile(scen_ret, 100 * (1 - conf_lvl))
+VaR = -np.percentile(scen_ret, 100 * (1 - conf_lvl))
 print("VaR:", VaR)
 
 # Plot the distribution of all 10,000 simulated portfolio outcomes
@@ -107,7 +107,7 @@ plt.ylabel('Frequency')
 plt.title(f'Distribution of Portfolio Gain/Loss Over {days} Days')
 
 # Draw a vertical line representing our worst-case VaR threshold
-plt.axvline(VaR, color='r', linestyle='dashed', linewidth=2, label=f'VaR at {conf_lvl:.0%} confidence level')
+plt.axvline(-VaR, color='r', linestyle='dashed', linewidth=2, label=f'VaR at {conf_lvl:.0%} confidence level')
 
 plt.legend()
 plt.show()
