@@ -9,105 +9,174 @@ from scipy.stats import norm
 # Helper Functions
 # ---------------------------------------------------------
 
-def gen_z_score():
-    # Generates a random number from a standard normal distribution (Mean = 0, Std Dev = 1)
-    # This represents the random market shocks in our simulation.
-    return np.random.normal(0,1)
+def gen_z_score(rng):
+    # Generate a standard normal market shock
+    return rng.normal(0, 1)
 
-def gain_loss(prf_value, prf_std_dev, z_score,prf_exp_ret, days):
-    # Calculates the simulated portfolio gain or loss over the specified time horizon.
-    # Formula components: 
-    # 1. Expected drift: (prf_value * prf_exp_ret * days)
-    # 2. Random shock: (prf_value * prf_std_dev * z_score * sqrt(days))
-    return prf_value * prf_exp_ret * days + prf_value * prf_std_dev * z_score * np.sqrt(days)
 
-def calc_exp_ret(weights, ln_ret):
-    # Calculates the expected daily return of the portfolio by taking the 
-    # dot product of the historical mean returns of each asset and their respective weights.
-    return np.sum(ln_ret.mean() * weights)
+def gain_loss(prf_value, prf_std_dev, z_score, prf_exp_ret, days):
+    # Linear normal approximation to portfolio profit/loss.
+    # This does not simulate compounded daily price paths.
+    return (
+        prf_value * prf_exp_ret * days
+        + prf_value * prf_std_dev * z_score * np.sqrt(days)
+    )
+
 
 def calc_std_dev(weights, cov_mat):
-    # Calculates the daily volatility (standard deviation) of the portfolio.
-    # Uses matrix multiplication: sqrt(Weights transposed * Covariance Matrix * Weights)
+    # Calculate daily portfolio volatility
     variance = weights.T @ cov_mat @ weights
     return np.sqrt(variance)
+
 
 # ---------------------------------------------------------
 # Simulation Setup & Parameters
 # ---------------------------------------------------------
+
 print("Monte Carlo VaR")
 
-# Define the historical time window for calculating returns and volatility
+# Define the historical time window
 years = 15
 end_date = dt.datetime.now()
-start_date = end_date - dt.timedelta(days = 365*years)
+start_date = end_date - dt.timedelta(days=365 * years)
 
-# Define the assets in the portfolio
-tickers = ['DBK.DE', 'CBK.DE' , 'SAN.MC', 'BNP.PA', 'GLD']
+# Define the assets in the portfolio (European bank stocks)
+tickers = ['DBK.DE', 'CBK.DE', 'SAN.MC', 'BNP.PA']
 
-# Define the Monte Carlo simulation parameters
-simulations = 10000       # Number of random scenarios to generate
-days = 100                # Time horizon for the VaR projection 
-prf_value = 1000000       # Initial portfolio value
-
-# Set confidence level (95% means we expect losses to exceed VaR only 5% of the time)
+# Define simulation parameters
+simulations = 10000
+days = 100                # Time horizon in trading observations
+prf_value = 1000000        # Initial portfolio value in EUR
 conf_lvl = 0.95
+
+# A fixed seed makes the simulation reproducible for identical data
+rng = np.random.default_rng(42)
 
 # ---------------------------------------------------------
 # Data Fetching & Processing
 # ---------------------------------------------------------
-adj_cl = pd.DataFrame()
 
-# Download historical adjusted closing prices from Yahoo Finance
-data = yf.download(tickers, start=start_date, end=end_date, auto_adjust=True)
+# Download historical adjusted closing prices
+data = yf.download(
+    tickers,
+    start=start_date,
+    end=end_date,
+    auto_adjust=True
+)
+
+if data.empty:
+    raise ValueError("No market data was downloaded.")
+
 adj_cl = data['Close']
 
-# Calculate daily logarithmic returns (standard practice in financial modeling)
-ln_ret = np.log(adj_cl / adj_cl.shift(1))
-ln_ret = ln_ret.dropna() # Remove the first row which will be NaN due to the shift
+# Keep prices in the same order as the portfolio weights
+adj_cl = adj_cl.reindex(columns=tickers)
 
-# Calculate the covariance matrix to understand how the assets move together
-cov_mat = ln_ret.cov()
+if adj_cl.empty or adj_cl.isna().all().any():
+    raise ValueError("Missing price data for one or more tickers.")
+
+if (adj_cl <= 0).any().any():
+    raise ValueError("Prices must be positive.")
+
+# Calculate daily simple returns without filling missing prices
+returns = adj_cl.pct_change(fill_method=None).dropna()
+
+if len(returns) < max(days, 2):
+    raise ValueError("Not enough historical data for the selected horizon.")
+
+if not np.isfinite(returns.to_numpy()).all():
+    raise ValueError("Returns contain non-finite values.")
+
+# Calculate the daily covariance matrix
+cov_mat = returns.cov()
 
 # ---------------------------------------------------------
 # Portfolio Metrics Calculation
 # ---------------------------------------------------------
 
-# Create an equally weighted portfolio (each asset gets 1/N of the capital)
+# Create an equally weighted portfolio
 weights = np.array([1 / len(tickers)] * len(tickers))
 
-# Calculate the historical expected return and standard deviation of our specific portfolio
-prf_exp_ret = calc_exp_ret(weights, ln_ret)
+# Use zero expected return to match the parametric model
+prf_exp_ret = 0.0
+
+# Calculate daily portfolio volatility
 prf_std_dev = calc_std_dev(weights, cov_mat)
 
 # ---------------------------------------------------------
 # Monte Carlo Simulation Engine
 # ---------------------------------------------------------
+
+# Assumes normal returns, constant variance, and no serial correlation.
+# Square-root-of-time scaling is approximate over 100 days.
 scen_ret = []
 
-# Run the simulation "simulations" times to create a distribution of possible outcomes
 for i in range(simulations):
-    z_score = gen_z_score()
-    # Calculate the simulated gain/loss for this specific random scenario and save it
-    scen_ret.append(gain_loss(prf_value, prf_std_dev, z_score, prf_exp_ret, days))
+    z_score = gen_z_score(rng)
+
+    scen_ret.append(
+        gain_loss(
+            prf_value,
+            prf_std_dev,
+            z_score,
+            prf_exp_ret,
+            days
+        )
+    )
+
+scen_ret = np.array(scen_ret)
 
 # ---------------------------------------------------------
-# Value at Risk (VaR) Calculation & Visualization
+# Value at Risk Calculation & Visualization
 # ---------------------------------------------------------
 
-# Calculate VaR by finding the exact percentile in our sorted simulated returns
-# For 95% confidence, we look at the 5th percentile (100 * (1 - 0.95))
 VaR = -np.percentile(scen_ret, 100 * (1 - conf_lvl))
-print("VaR:", VaR)
 
-# Plot the distribution of all 10,000 simulated portfolio outcomes
-plt.hist(scen_ret, bins=50, density=True)
-plt.xlabel('Scenario Gain/Loss ($)')
-plt.ylabel('Frequency')
-plt.title(f'Distribution of Portfolio Gain/Loss Over {days} Days')
+# Analytical VaR under the same normal-return model.
+# Monte Carlo should approach this value as simulations increase.
+parametric_VaR = prf_value * (
+    prf_std_dev * norm.ppf(conf_lvl) * np.sqrt(days)
+    - prf_exp_ret * days
+)
 
-# Draw a vertical line representing our worst-case VaR threshold
-plt.axvline(-VaR, color='r', linestyle='dashed', linewidth=2, label=f'VaR at {conf_lvl:.0%} confidence level')
+print(f'\nPortfolio value: €{prf_value:,.2f}')
+print(f'Horizon: {days} trading observations')
+print(f'Simulations: {simulations:,}')
+print(f'Monte Carlo VaR at {conf_lvl:.0%}: €{VaR:,.2f}')
+print(f'Analytical VaR at {conf_lvl:.0%}: €{parametric_VaR:,.2f}')
 
+plt.figure(figsize=(10, 6))
+
+plt.hist(
+    scen_ret,
+    bins=50,
+    density=True,
+    alpha=0.75,
+    edgecolor='black',
+    label='Simulated Portfolio P&L'
+)
+
+plt.axvline(
+    -VaR,
+    color='r',
+    linestyle='dashed',
+    linewidth=2,
+    label=f'Monte Carlo VaR ({conf_lvl:.0%})'
+)
+
+plt.axvline(
+    -parametric_VaR,
+    color='black',
+    linestyle='dotted',
+    linewidth=2,
+    label=f'Analytical VaR ({conf_lvl:.0%})'
+)
+
+plt.xlabel(f'{days}-Day Portfolio Profit / Loss (EUR)')
+plt.ylabel('Probability Density')
+plt.title(f'Distribution of Simulated {days}-Day Portfolio P&L')
 plt.legend()
+plt.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+
 plt.show()
